@@ -2,6 +2,7 @@
 import subprocess
 import os
 import sys
+import time  # <--- Added for sleep functionality
 from google import genai
 
 # Configuration
@@ -30,7 +31,7 @@ def get_staged_diff():
         sys.exit(1)
 
 def generate_commit_message(diff):
-    """Sends the diff to Gemini and asks for a commit message."""
+    """Sends the diff to Gemini and asks for a commit message with retry logic."""
     prompt = f"""
     You are an expert developer. precise and concise.
     Analyze the following 'git diff' output and generate a commit message.
@@ -45,15 +46,30 @@ def generate_commit_message(diff):
     {diff}
     """
 
-    try:
-        # New SDK usage
-        response = client.models.generate_content(
-            model='gemini-3-flash-preview',
-            contents=prompt
-        )
-        return response.text.strip()
-    except Exception as e:
-        return f"Error communicating with Gemini: {e}"
+    # Retry Configuration
+    max_retries = 3
+    base_delay = 2  # Start waiting 2 seconds
+
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model='gemini-3-flash-preview',
+                contents=prompt
+            )
+            return response.text.strip()
+
+        except Exception as e:
+            error_str = str(e)
+            # Check for Overloaded (503) or Rate Limit (429) errors
+            if "503" in error_str or "429" in error_str:
+                if attempt < max_retries - 1:
+                    sleep_time = base_delay * (2 ** attempt) # 2s, 4s, 8s...
+                    print(f"⚠️  Model overloaded. Retrying in {sleep_time}s... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(sleep_time)
+                    continue
+
+            # If it's not a retriable error, or we ran out of retries, return the error
+            return f"Error communicating with Gemini: {e}"
 
 def main():
     diff = get_staged_diff()
@@ -75,6 +91,11 @@ def main():
     print(message)
     print("\n" + "="*30)
 
+    # Added check: Don't ask to commit if there was an API error
+    if message.startswith("Error communicating"):
+        print("❌ Could not generate message due to API error.")
+        sys.exit(1)
+
     choice = input("Do you want to commit with this message? (y/n): ")
     if choice.lower() == 'y':
         subprocess.run(["git", "commit", "-m", message])
@@ -84,5 +105,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
